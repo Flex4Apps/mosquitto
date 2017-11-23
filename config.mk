@@ -127,7 +127,7 @@ LIB_LIBS:=
 PASSWD_LIBS:=
 
 ifeq ($(UNAME),Linux)
-	BROKER_LIBS:=$(BROKER_LIBS) -lrt -Wl,--dynamic-list=linker.syms
+	BROKER_LIBS:=$(BROKER_LIBS) -lrt -Wl,--dynamic-list=linker.syms -lpthread -ljansson -lnsutils
 	LIB_LIBS:=$(LIB_LIBS) -lrt
 endif
 

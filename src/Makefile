@@ -101,6 +101,10 @@ mosquitto_passwd : mosquitto_passwd.o
 mosquitto_passwd.o : mosquitto_passwd.c
 	${CROSS_COMPILE}${CC} $(CFLAGS) ${CPPFLAGS} -c $< -o $@
 
+mosquitto : hicap.o
+hicap.o : ../lib/hicap.c ../lib/hicap.h
+	${CROSS_COMPILE}${CC} $(BROKER_CFLAGS) -c $< -o $@
+
 install : all
 	$(INSTALL) -d ${DESTDIR}$(prefix)/sbin
 	$(INSTALL) -s --strip-program=${CROSS_COMPILE}${STRIP} mosquitto ${DESTDIR}${prefix}/sbin/mosquitto
