@@ -193,17 +193,6 @@ int mqtt3_socket_accept(struct mosquitto_db *db, mosq_sock_t listensock)
 
 	_mosquitto_log_printf(NULL, MOSQ_LOG_NOTICE, "New connection from %s on port %d.", new_context->address, new_context->listener->port);
 
-#ifdef WITH_BROKER
-	/*FILE *fp = popen( "nc6 -vv -n --send-only 127.0.0.1 12345", "w" );
-	char eof = EOF;
-	fwrite( "C\n", 2, 1, fp );
-	//system("ps aux | grep nc6");
-	fwrite( &eof, 1, 1, fp );
-	pclose( fp );*/
-    #include <hicap.h>
-    hicap_capture( new_context, "connected\n" );
-#endif
-
 	return new_sock;
 }
 

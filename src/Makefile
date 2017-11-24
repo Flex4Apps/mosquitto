@@ -103,7 +103,7 @@ mosquitto_passwd.o : mosquitto_passwd.c
 
 mosquitto : hicap.o
 hicap.o : ../lib/hicap.c ../lib/hicap.h
-	${CROSS_COMPILE}${CC} $(BROKER_CFLAGS) -c $< -o $@
+	${CROSS_COMPILE}${CC} $(BROKER_CFLAGS) -Wextra -c $< -o $@
 
 install : all
 	$(INSTALL) -d ${DESTDIR}$(prefix)/sbin

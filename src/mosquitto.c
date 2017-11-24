@@ -456,6 +456,11 @@ int main(int argc, char *argv[])
 	mqtt3_config_cleanup(int_db.config);
 	_mosquitto_net_cleanup();
 
+#ifdef WITH_HICAP
+	#include <hicap.h>
+	hicap_shutdown();
+#endif // WITH_HICAP
+
 	return rc;
 }
 

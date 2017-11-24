@@ -215,6 +215,10 @@ int mqtt3_handle_publish(struct mosquitto_db *db, struct mosquitto *context)
 	}
 
 	_mosquitto_log_printf(NULL, MOSQ_LOG_DEBUG, "Received PUBLISH from %s (d%d, q%d, r%d, m%d, '%s', ... (%ld bytes))", context->id, dup, qos, retain, mid, topic, (long)payloadlen);
+#ifdef WITH_HICAP
+	#include <hicap.h>
+	hicap_capture( context, topic, payload, payloadlen );
+#endif // WITH_HICAP
 	if(qos > 0){
 		mqtt3_db_message_store_find(context, mid, &stored);
 	}

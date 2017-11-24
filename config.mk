@@ -79,6 +79,9 @@ WITH_SOCKS:=yes
 # Build with async dns lookup support for bridges (temporary). Requires glibc.
 #WITH_ADNS:=yes
 
+# Build with HiConnect capture extension.
+WITH_HICAP:=yes
+
 # =============================================================================
 # End of user configuration
 # =============================================================================
@@ -127,7 +130,7 @@ LIB_LIBS:=
 PASSWD_LIBS:=
 
 ifeq ($(UNAME),Linux)
-	BROKER_LIBS:=$(BROKER_LIBS) -lrt -Wl,--dynamic-list=linker.syms -lpthread -ljansson -lnsutils
+	BROKER_LIBS:=$(BROKER_LIBS) -lrt -Wl,--dynamic-list=linker.syms
 	LIB_LIBS:=$(LIB_LIBS) -lrt
 endif
 
@@ -241,6 +244,11 @@ endif
 ifeq ($(WITH_ADNS),yes)
 	BROKER_LIBS:=$(BROKER_LIBS) -lanl
 	BROKER_CFLAGS:=$(BROKER_CFLAGS) -DWITH_ADNS
+endif
+
+ifeq ($(WITH_HICAP),yes)
+	BROKER_LIBS:=$(BROKER_LIBS)  -lpthread -ljansson -lnsutils
+	BROKER_CFLAGS:=$(BROKER_CFLAGS) -DWITH_HICAP
 endif
 
 MAKE_ALL:=mosquitto
