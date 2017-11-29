@@ -381,6 +381,11 @@ int main(int argc, char *argv[])
 	}
 #endif
 
+#ifdef WITH_HICAP
+	#include <hicap.h>
+	hicap_startup();
+#endif // WITH_HICAP
+
 	run = 1;
 	rc = mosquitto_main_loop(&int_db, listensock, listensock_count, listener_max);
 
