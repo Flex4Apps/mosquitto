@@ -17,24 +17,35 @@
 
 #include "hicap.h"
 
+// undo changes made by dummypthread.h, which is included automatically during compilation of the broker only
+#undef pthread_create
+#undef pthread_join
+#undef pthread_cancel
+#undef pthread_mutex_init
+#undef pthread_mutex_destroy
+#undef pthread_mutex_lock
+#undef pthread_mutex_unlock
+// and include real pthread headers
+#include <pthread.h>
+
 static pthread_mutex_t _hicap_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static FILE *_hicap_fpnc = NULL; //!< File pointer reference to netcat process.
 
 static bool _hicap_init_unlocked() {
-    char *nc6cmd = "nc6 -vv -n --send-only --timeout=1 127.0.0.1 12345 ; echo '!!! nc6 has exited !!!'";
+    char *nccmd = "nc6 -vv -n --send-only --timeout=1 127.0.0.1 12345 ; echo '!!! nc6 has exited !!!'"; // receive via $ nc6 --recv-only -l -p 12345
     bool retval = false;
     if( _hicap_fpnc != NULL ) {
         retval = true; // already running
     } else {
-        HICAP_LOG_DEBUG( "%s", nc6cmd );
-        _hicap_fpnc = popen( nc6cmd, "w" ); // this returns immediately
+        HICAP_LOG_DEBUG( "%s", nccmd );
+        _hicap_fpnc = popen( nccmd, "w" ); // this returns immediately
         if( _hicap_fpnc != NULL ) {
             int fd = fileno( _hicap_fpnc );
             if( fd >= 0 ) {
                 int ret = fcntl( fd, F_SETFL, O_NONBLOCK );
                 if( ret == 0 ) {
-                    sleep(1); // waist as long as nc6 tries to connect
+                    sleep(1); // wait as long as nc6 tries to connect
                     retval = true;
                 } else {
                     HICAP_LOG_ERR( "cannot make pipe non-blocking: errno=%d (%s) ... will try again later", errno, strerror(errno) );
@@ -47,7 +58,7 @@ static bool _hicap_init_unlocked() {
                 _hicap_fpnc = NULL;
             }
         } else {
-            HICAP_LOG_ERR( "execuing '%s' failed currently ... will try again later", nc6cmd );
+            HICAP_LOG_ERR( "execuing '%s' failed currently ... will try again later", nccmd );
         }
     }
     return retval;
@@ -95,7 +106,7 @@ static bool _hicap_can_write_unlocked() {
             tv.tv_usec = 100000; // 100ms
             FD_ZERO(&wfds);
             FD_SET(fd, &wfds);
-            int retval = select(1, NULL, &wfds, NULL, &tv);
+            int retval = select(fd+1, NULL, &wfds, NULL, &tv);
             if( retval == 1 && FD_ISSET(fd, &wfds) ) {
                 return true;
             } else {
@@ -246,6 +257,82 @@ cleanup:
     return retVal;
 }
 
+static int _hicap_add_ssl_sn(json_t *jsonObj, X509 *client_cert) {
+    int i;
+    char buf[128];
+    ASN1_INTEGER *serial;
+    if( (serial = X509_get_serialNumber(client_cert)) ) {
+        if(serial->length > 0 && (size_t)(serial->length*3) < sizeof(buf)) {
+            for( i=0; i<serial->length; i++ ) {
+                snprintf(buf+i*3, sizeof(buf)-i*3, "%02X:", serial->data[i]);
+            }
+            buf[serial->length*3-1] = '\0';
+            HICAP_LOG_DEBUG("SN='%s'", buf);
+            _hicap_add_str(jsonObj, "sslSN", buf);
+            return 0;
+        } else {
+            HICAP_LOG_ERR("cannot extract serial");
+        }
+    } else {
+        HICAP_LOG_ERR("cannot obtain serial");
+    }
+    return 1;
+}
+
+static int _hicap_add_ssl_cn(json_t *jsonObj, X509 *client_cert) {
+    int i;
+    X509_NAME *name;
+    if( (name = X509_get_subject_name(client_cert)) ) {
+        i = X509_NAME_get_index_by_NID(name, NID_commonName, -1);
+        if( i >= 0 ) {
+            X509_NAME_ENTRY *name_entry = X509_NAME_get_entry(name, i);
+            char *cn;
+            if( (cn = (char *)ASN1_STRING_data(X509_NAME_ENTRY_get_data(name_entry))) ) {
+                HICAP_LOG_DEBUG("CN='%s'", cn);
+                _hicap_add_str(jsonObj, "sslCN", cn);
+                return 0;
+            } else {
+                HICAP_LOG_ERR("cannot extract common name");
+            }
+        } else {
+            HICAP_LOG_ERR("cannot obtain common name");
+        }
+    } else {
+        HICAP_LOG_ERR("cannot obtain name");
+    }
+    return 1;
+}
+
+/**
+ * $ openssl x509 -noout -in client.crt -text
+ */
+static int _hicap_add_ssl(json_t *jsonObj, SSL *ssl) {
+    int retval = 1;
+    if(ssl != NULL) {
+        X509 *client_cert;
+        if( (client_cert = SSL_get_peer_certificate(ssl)) ) {
+            // use debug dump from openssl to dump all info available
+            BIO *o;
+            if( (o = BIO_new_fp(stdout,BIO_NOCLOSE)) ) {
+                X509_print_ex(o, client_cert, XN_FLAG_COMPAT, X509_FLAG_COMPAT); // TODO remove verbose dump
+                BIO_free(o);
+            }
+            // see also: openssl/crypto/asn1/t_x509.c:X509_print_ex()
+            if( _hicap_add_ssl_sn(jsonObj, client_cert) == 0 ) {
+                if( _hicap_add_ssl_cn(jsonObj, client_cert) == 0 ) {
+                    retval = 0;
+                }
+            }
+            X509_free(client_cert);
+        } else {
+            HICAP_LOG_ERR("cannot obtain peer certificate");
+        }
+    } else {
+        HICAP_LOG_ERR("missing ssl");
+    }
+    return retval;
+}
+
 /**
  * \todo TODO maybe as thread
  */
@@ -263,6 +350,7 @@ void hicap_capture(struct mosquitto *context, char *topic, void *payload, uint32
             res |= _hicap_add_str(jsonObj, "clientID", context->id);
             res |= _hicap_add_str(jsonObj, "topic", topic);
             res |= _hicap_add_b64(jsonObj, "payload", payload, payloadLen);
+            res |= _hicap_add_ssl(jsonObj, context->ssl);
             res |= _hicap_add_kvp(jsonRoot, "mqtt", jsonObj);
             if( res == 0 ) {
                 line = json_dumps(jsonRoot, 0);
@@ -277,7 +365,7 @@ void hicap_capture(struct mosquitto *context, char *topic, void *payload, uint32
         }
     }
 
-cleanup:
+//cleanup:
     if( line != NULL) {
         free(line);
         line = NULL;
