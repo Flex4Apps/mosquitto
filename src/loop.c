@@ -47,6 +47,10 @@ Contributors:
 #include <time_mosq.h>
 #include <util_mosq.h>
 
+#ifdef WITH_HICAP
+#include <hicap.h>
+#endif // WITH_HICAP
+
 extern bool flag_reload;
 #ifdef WITH_PERSISTENCE
 extern bool flag_db_backup;
@@ -354,6 +358,9 @@ int mosquitto_main_loop(struct mosquitto_db *db, mosq_sock_t *listensock, int li
 #else
 		fdcount = WSAPoll(pollfds, pollfd_index, 100);
 #endif
+#ifdef WITH_HICAP
+		hicap_run();
+#endif // WITH_HICAP
 		if(fdcount == -1){
 			_mosquitto_log_printf(NULL, MOSQ_LOG_ERR, "Error in poll: %s.", strerror(errno));
 		}else{

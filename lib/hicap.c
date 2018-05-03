@@ -12,10 +12,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 
-#include <nsutils/base64.h>
-#include <jansson.h>
-
-#include "hicap.h"
+#include "hicap.h" // this includes broker headers and also dummypthread.h
 
 // undo changes made by dummypthread.h, which is included automatically during compilation of the broker only
 #undef pthread_create
@@ -28,40 +25,50 @@
 // and include real pthread headers
 #include <pthread.h>
 
+#include <nsutils/base64.h>
+#include <jansson.h>
+#include <uv.h>
+
 static pthread_mutex_t _hicap_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static FILE *_hicap_fpnc = NULL; //!< File pointer reference to netcat process.
+//static uv_loop_t            *_uvLoop;
+static uv_tcp_t             _uvSock;
+static uv_connect_t         _uvConn;
+static struct sockaddr_in   _dest;
+static bool                 _isInitialized = false;
+
+static void _uv_on_connect_cb( uv_connect_t *conn, int uvErr ) {
+    if( uvErr == 0 )
+        HICAP_LOG_DEBUG("_uv_on_connect() connect successfull");
+    else
+        HICAP_LOG_ERR( "_uv_on_connect() connect failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
+}
 
 static bool _hicap_init_unlocked() {
-    char *nccmd = "nc6 -vv -n --send-only --timeout=1 127.0.0.1 12345 ; echo '!!! nc6 has exited !!!'"; // receive via $ nc6 --recv-only -l -p 12345
-    bool retval = false;
-    if( _hicap_fpnc != NULL ) {
-        retval = true; // already running
-    } else {
-        HICAP_LOG_DEBUG( "%s", nccmd );
-        _hicap_fpnc = popen( nccmd, "w" ); // this returns immediately
-        if( _hicap_fpnc != NULL ) {
-            int fd = fileno( _hicap_fpnc );
-            if( fd >= 0 ) {
-                int ret = fcntl( fd, F_SETFL, O_NONBLOCK );
-                if( ret == 0 ) {
-                    sleep(1); // wait as long as nc6 tries to connect
-                    retval = true;
+    int uvErr;
+    if( _isInitialized == false ) {
+        uvErr = uv_tcp_init(uv_default_loop(), &_uvSock);
+        if( uvErr == 0 ) {
+            uvErr = uv_ip4_addr("127.0.0.1", 12345, &_dest); // TODO Make logstash IP and port configurable and add IPv6 support!
+            if( uvErr == 0 ) {
+                uvErr = uv_tcp_connect(&_uvConn, &_uvSock, (const struct sockaddr*)&_dest, _uv_on_connect_cb);
+                if( uvErr == 0 ) {
+                    HICAP_LOG_NOTICE("HICAP interface successfully initialized");
+                    _isInitialized = true;
+                    return true;
                 } else {
-                    HICAP_LOG_ERR( "cannot make pipe non-blocking: errno=%d (%s) ... will try again later", errno, strerror(errno) );
-                    pclose( _hicap_fpnc );
-                    _hicap_fpnc = NULL;
+                    HICAP_LOG_ERR( "uv_tcp_connect() failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
                 }
             } else {
-                HICAP_LOG_ERR( "cannot get file descriptor of pipe: errno=%d (%s) ... will try again later", errno, strerror(errno) );
-                pclose( _hicap_fpnc );
-                _hicap_fpnc = NULL;
+                HICAP_LOG_ERR( "uv_ip4_addr() failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
             }
         } else {
-            HICAP_LOG_ERR( "execuing '%s' failed currently ... will try again later", nccmd );
+            HICAP_LOG_ERR( "uv_tcp_init() failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
         }
+        return false;
+    } else {
+        return true; // already initialized
     }
-    return retval;
 }
 
 static bool _hicap_init() {
@@ -78,14 +85,22 @@ void hicap_startup() {
     HICAP_LOG_NOTICE("HICAP interface started.");
 }
 
+static void _uv_on_close_cb( uv_handle_t* handle ) {
+    HICAP_LOG_DEBUG();
+}
+
+void hicap_run() {
+    int uvErr = uv_run(uv_default_loop(), UV_RUN_DEFAULT);
+    if( uvErr != 0 ) {
+        HICAP_LOG_ERR( "uv_run() failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
+    }
+}
+
 static void _hicap_shutdown_unlocked() {
     HICAP_LOG_DEBUG();
-    char eof = EOF;
-    if( _hicap_fpnc != NULL ) {
-        fwrite( &eof, 1, 1, _hicap_fpnc );
-        pclose( _hicap_fpnc );
-    }
-    _hicap_fpnc = NULL;
+    uv_close( (uv_handle_t*)&_uvSock, _uv_on_close_cb );
+    uv_stop( uv_default_loop() );
+    uv_loop_close( uv_default_loop() );
 }
 
 void hicap_shutdown() {
@@ -95,79 +110,41 @@ void hicap_shutdown() {
     pthread_mutex_unlock( &_hicap_mutex );
 }
 
-static bool _hicap_can_write_unlocked() {
-    HICAP_LOG_DEBUG();
-    if( _hicap_fpnc != NULL ) {
-        int fd = fileno( _hicap_fpnc );
-        if( fd >= 0 ) {
-            fd_set wfds;
-            struct timeval tv;
-            tv.tv_sec = 0;
-            tv.tv_usec = 100000; // 100ms
-            FD_ZERO(&wfds);
-            FD_SET(fd, &wfds);
-            int retval = select(fd+1, NULL, &wfds, NULL, &tv);
-            if( retval == 1 && FD_ISSET(fd, &wfds) ) {
-                return true;
-            } else {
-                HICAP_LOG_ERR("can write test failed");
-            }
-        } else {
-            HICAP_LOG_ERR("cannot obtain fd");
-        }
-    }
-    return false;
+static void _uv_on_write_cb( uv_write_t *req, int uvErr ) {
+    if( uvErr == 0 )
+        HICAP_LOG_DEBUG("_uv_on_write() write successfull");
+    else
+        HICAP_LOG_ERR( "_uv_on_write() write failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
+    if( req && req->data )
+        free(req->data);
+    if( req )
+        free(req);
 }
 
-static bool _hicap_write_once_unlocked( void *data, size_t dataLen ) {
-    bool retval = true;
-    HICAP_LOG_DEBUG("writing %zd bytes", dataLen);
-    clearerr( _hicap_fpnc );
-    size_t ret = fwrite( data, 1, dataLen, _hicap_fpnc );
-    if( ret != dataLen ) {
-        HICAP_LOG_NOTICE( "pipe write error: ret=%zd", ret );
-        retval = false;
-    }
-    int err = feof( _hicap_fpnc );
-    if( err != 0) {
-        HICAP_LOG_NOTICE( "pipe is closed: err=%d", err );
-        retval = false;
-    }
-    err = ferror( _hicap_fpnc );
-    if( err != 0) {
-        HICAP_LOG_NOTICE( "pipe write error: %d (%s)", err, strerror(err) );
-        retval = false;
-    }
-    err = fflush( _hicap_fpnc );
-    if( err != 0 ) {
-        HICAP_LOG_NOTICE( "pipe flush error: %d (%s)", err, strerror(err) );
-        retval = false;
-    }
-    if( retval == true ) {
-        HICAP_LOG_DEBUG("writing %zd bytes succeeded", dataLen);
-    }
-    return retval;
-}
-
+/**
+ * NOTE: The caller must NOT free data in any case.
+ */
 static bool _hicap_write( void *data, size_t dataLen ) {
     bool retval = false;
-    HICAP_LOG_DEBUG("writing %zd bytes", dataLen);
-    if( dataLen > PIPE_BUF ) {
-        HICAP_LOG_WARN("atomar write of message (len:%zd) not guaranteed (max buf size:%d)", dataLen, PIPE_BUF);
-    }
+    int uvErr;
     pthread_mutex_lock( &_hicap_mutex );
-    if( _hicap_can_write_unlocked() && _hicap_write_once_unlocked(data, dataLen) == true) {
+    HICAP_LOG_DEBUG("writing %zd bytes", dataLen);
+    //if( dataLen > PIPE_BUF ) {
+    //    HICAP_LOG_WARN("atomar write of message (len:%zd) not guaranteed (max buf size:%d)", dataLen, PIPE_BUF);
+    //}
+    uv_write_t *req = (uv_write_t*) malloc(sizeof(uv_write_t));
+    uv_buf_t buf = uv_buf_init(data, dataLen);
+    req->data = data; // remember for later free
+    uvErr = uv_write( req, (uv_stream_t*)(&_uvSock), &buf, 1, _uv_on_write_cb );
+    if( uvErr == 0 ) {
+        HICAP_LOG_DEBUG( "uv_write() success" );
+        //int alive = uv_loop_alive( uv_default_loop() );
+        //HICAP_LOG_DEBUG("loop alive: %s", alive != 0 ? "yes" : "stopped");
         retval = true;
     } else {
-        HICAP_LOG_NOTICE("retrying now");
-        _hicap_shutdown_unlocked();
-        if( _hicap_init_unlocked() == true ) {
-            if( _hicap_can_write_unlocked() && _hicap_write_once_unlocked(data, dataLen) == true) {
-                retval = true;
-            } else {
-                HICAP_LOG_ERR("retry failed");
-            }
-        }
+        HICAP_LOG_ERR( "uv_write() failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
+        free(req);
+        free(data);
     }
     pthread_mutex_unlock( &_hicap_mutex );
     return retval;
@@ -328,7 +305,8 @@ static int _hicap_add_ssl(json_t *jsonObj, SSL *ssl) {
             HICAP_LOG_ERR("cannot obtain peer certificate");
         }
     } else {
-        HICAP_LOG_ERR("missing ssl");
+        HICAP_LOG_INFO("missing ssl");
+        retval = 0;
     }
     return retval;
 }
@@ -379,7 +357,7 @@ void hicap_capture(struct mosquitto *context, char *topic, void *payload, uint32
                 HICAP_LOG_DEBUG("line:%s\n", line!=NULL?line:"<NULL>");
                 size_t len = strlen(line);
                 line[len] = '\n';
-                _hicap_write( line, len+1 );
+                _hicap_write( line, len+1 ); // the function cares about freeing line in any case
                 line[len] = '\0';
             } else {
                 HICAP_LOG_ERR("cannot assemble json obj");
@@ -390,10 +368,10 @@ void hicap_capture(struct mosquitto *context, char *topic, void *payload, uint32
     }
 
 //cleanup:
-    if( line != NULL) {
-        free(line);
-        line = NULL;
-    }
+    //if( line != NULL) {
+    //    free(line);
+    //    line = NULL;
+    //}
     if( jsonObj != NULL ) {
         json_decref(jsonObj);
         jsonObj = NULL;

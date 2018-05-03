@@ -65,6 +65,10 @@ int allow_severity = LOG_INFO;
 int deny_severity = LOG_INFO;
 #endif
 
+#ifdef WITH_HICAP
+#include <hicap.h>
+#endif // WITH_HICAP
+
 void handle_sigint(int signal);
 void handle_sigusr1(int signal);
 void handle_sigusr2(int signal);
@@ -382,7 +386,6 @@ int main(int argc, char *argv[])
 #endif
 
 #ifdef WITH_HICAP
-	#include <hicap.h>
 	hicap_startup();
 #endif // WITH_HICAP
 
@@ -462,7 +465,6 @@ int main(int argc, char *argv[])
 	_mosquitto_net_cleanup();
 
 #ifdef WITH_HICAP
-	#include <hicap.h>
 	hicap_shutdown();
 #endif // WITH_HICAP
 

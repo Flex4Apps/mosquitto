@@ -17,6 +17,7 @@
     extern void hicap_capture(struct mosquitto *context, char *topic, void *payload, uint32_t payloadlen);
 
     extern void hicap_startup();
+    extern void hicap_run();
     extern void hicap_shutdown();
 
     #endif // _HICAP_H_
