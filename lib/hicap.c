@@ -36,12 +36,30 @@ static uv_tcp_t             _uvSock;
 static uv_connect_t         _uvConn;
 static struct sockaddr_in   _dest;
 static bool                 _isInitialized = false;
+static bool                 _isConnected = false;
 
 static void _uv_on_connect_cb( uv_connect_t *conn, int uvErr ) {
-    if( uvErr == 0 )
+    if( uvErr == 0 ) {
+        _isConnected = true;
         HICAP_LOG_DEBUG("_uv_on_connect() connect successfull");
-    else
+    } else {
+        _isConnected = false;
         HICAP_LOG_ERR( "_uv_on_connect() connect failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
+    }
+}
+
+static void _hicap_auto_reconnect_unlocked() {
+    int uvErr;
+    if( _isInitialized ) {
+        if( !_isConnected ) {
+            uvErr = uv_tcp_connect(&_uvConn, &_uvSock, (const struct sockaddr*)&_dest, _uv_on_connect_cb);
+            if( uvErr != 0 ) {
+                HICAP_LOG_ERR( "uv_tcp_connect() failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
+            }
+        }
+    } else {
+        HICAP_LOG_ERR( "cannot initiate reconnect" );
+    }
 }
 
 static bool _hicap_init_unlocked() {
@@ -51,14 +69,10 @@ static bool _hicap_init_unlocked() {
         if( uvErr == 0 ) {
             uvErr = uv_ip4_addr("127.0.0.1", 12345, &_dest); // TODO Make logstash IP and port configurable and add IPv6 support!
             if( uvErr == 0 ) {
-                uvErr = uv_tcp_connect(&_uvConn, &_uvSock, (const struct sockaddr*)&_dest, _uv_on_connect_cb);
-                if( uvErr == 0 ) {
-                    HICAP_LOG_NOTICE("HICAP interface successfully initialized");
-                    _isInitialized = true;
-                    return true;
-                } else {
-                    HICAP_LOG_ERR( "uv_tcp_connect() failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
-                }
+                _isInitialized = true;
+                HICAP_LOG_NOTICE("HICAP interface successfully initialized");
+                _hicap_auto_reconnect_unlocked();
+                return true;
             } else {
                 HICAP_LOG_ERR( "uv_ip4_addr() failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
             }
@@ -82,11 +96,6 @@ static bool _hicap_init() {
 void hicap_startup() {
     HICAP_LOG_NOTICE("Starting HICAP interface...");
     _hicap_init();
-    HICAP_LOG_NOTICE("HICAP interface started.");
-}
-
-static void _uv_on_close_cb( uv_handle_t* handle ) {
-    HICAP_LOG_DEBUG();
 }
 
 void hicap_run() {
@@ -94,6 +103,11 @@ void hicap_run() {
     if( uvErr != 0 ) {
         HICAP_LOG_ERR( "uv_run() failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
     }
+}
+
+static void _uv_on_close_cb( uv_handle_t* handle ) {
+    HICAP_LOG_DEBUG();
+    _isConnected = false;
 }
 
 static void _hicap_shutdown_unlocked() {
@@ -111,10 +125,13 @@ void hicap_shutdown() {
 }
 
 static void _uv_on_write_cb( uv_write_t *req, int uvErr ) {
-    if( uvErr == 0 )
+    if( uvErr == 0 ) {
         HICAP_LOG_DEBUG("_uv_on_write() write successfull");
-    else
+    } else {
         HICAP_LOG_ERR( "_uv_on_write() write failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
+        _isConnected = false;
+        //uv_close( (uv_handle_t*)&_uvSock, _uv_on_close_cb );
+    }
     if( req && req->data )
         free(req->data);
     if( req )
@@ -129,12 +146,15 @@ static bool _hicap_write( void *data, size_t dataLen ) {
     int uvErr;
     pthread_mutex_lock( &_hicap_mutex );
     HICAP_LOG_DEBUG("writing %zd bytes", dataLen);
+    _hicap_auto_reconnect_unlocked();
     //if( dataLen > PIPE_BUF ) {
     //    HICAP_LOG_WARN("atomar write of message (len:%zd) not guaranteed (max buf size:%d)", dataLen, PIPE_BUF);
     //}
     uv_write_t *req = (uv_write_t*) malloc(sizeof(uv_write_t));
     uv_buf_t buf = uv_buf_init(data, dataLen);
     req->data = data; // remember for later free
+    //int isWritable = uv_is_writable( (uv_stream_t*)(&_uvSock) );
+    //HICAP_LOG_DEBUG( "is writable: %s", isWritable?"yes":"no");
     uvErr = uv_write( req, (uv_stream_t*)(&_uvSock), &buf, 1, _uv_on_write_cb );
     if( uvErr == 0 ) {
         HICAP_LOG_DEBUG( "uv_write() success" );
