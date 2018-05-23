@@ -23,11 +23,12 @@
 #undef pthread_mutex_lock
 #undef pthread_mutex_unlock
 // and include real pthread headers
-#include <pthread.h>
+#include <pthread.h>                // needed for locking
 
-#include <nsutils/base64.h>
-#include <jansson.h>
-#include <uv.h>
+#include <nsutils/base64.h>         // needed for BASE-64 encoding of mqtt payload
+#include <jansson.h>                // needed for JSON encoding of collected metadata
+#include <uv.h>                     // needed for sending collected metadata over TCP to logstash (elastic search stack) or netcat
+#include <openssl/ssl.h>            // needed for decoding SSL client certificate
 
 static pthread_mutex_t _hicap_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -38,7 +39,7 @@ static struct sockaddr_in   _dest;
 static bool                 _isInitialized = false;
 static bool                 _isConnected = false;
 
-static void _uv_on_connect_cb( uv_connect_t *conn, int uvErr ) {
+static void _uv_on_connect_cb( __attribute__((unused)) uv_connect_t *conn, int uvErr ) {
     if( uvErr == 0 ) {
         _isConnected = true;
         HICAP_LOG_DEBUG("_uv_on_connect() connect successfull");
@@ -105,7 +106,7 @@ void hicap_run() {
     }
 }
 
-static void _uv_on_close_cb( uv_handle_t* handle ) {
+static void _uv_on_close_cb( __attribute__((unused)) uv_handle_t* handle ) {
     HICAP_LOG_DEBUG();
     _isConnected = false;
 }
