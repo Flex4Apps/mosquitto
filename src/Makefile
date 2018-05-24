@@ -205,9 +205,13 @@ mosquitto_passwd.o : mosquitto_passwd.c
 plugin_defer.so : plugin_defer.c mosquitto_plugin.h mosquitto_broker.h mosquitto_broker_internal.h
 	${CROSS_COMPILE}${CC} -I. -I../lib -fPIC -shared $< -o $@
 
-mosquitto : hicap.o
+ifeq ($(WITH_HICAP),yes)
+mosquitto : hicap.o base64.o
 hicap.o : ../lib/hicap.c ../lib/hicap.h
 	${CROSS_COMPILE}${CC} $(BROKER_CFLAGS) -Wextra -c $< -o $@
+base64.o : ../lib/nsutils/base64.c
+	${CROSS_COMPILE}${CC} $(BROKER_CFLAGS) -Wextra -c $< -o $@
+endif
 
 install : all
 	$(INSTALL) -d "${DESTDIR}$(prefix)/sbin"

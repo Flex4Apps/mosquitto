@@ -264,7 +264,7 @@ ifeq ($(WITH_ADNS),yes)
 endif
 
 ifeq ($(WITH_HICAP),yes)
-	BROKER_LIBS:=$(BROKER_LIBS)  -lpthread -ljansson -lnsutils -luv
+	BROKER_LIBS:=$(BROKER_LIBS)  -lpthread -ljansson -luv
 	BROKER_CFLAGS:=$(BROKER_CFLAGS) -DWITH_HICAP
 endif
 
