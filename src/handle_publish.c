@@ -184,7 +184,7 @@ int handle__publish(struct mosquitto_db *db, struct mosquitto *context)
 
 	log__printf(NULL, MOSQ_LOG_DEBUG, "Received PUBLISH from %s (d%d, q%d, r%d, m%d, '%s', ... (%ld bytes))", context->id, dup, qos, retain, mid, topic, (long)payloadlen);
 #ifdef WITH_HICAP
-	hicap_capture( context, topic, payload.ptr, payloadlen );
+	hicap_capture( context, topic, UHPA_ACCESS(payload, payloadlen), payloadlen );
 #endif // WITH_HICAP
 	if(qos > 0){
 		db__message_store_find(context, mid, &stored);
