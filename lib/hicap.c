@@ -73,7 +73,7 @@ static bool _hicap_init_unlocked() {
                 ip = "127.0.0.1";
             char *portStr = getenv("HICAP_PORT");
             int port = portStr ? atoi(portStr) : 12345;
-            uvErr = uv_ip4_addr("127.0.0.1", 12345, &_dest); // TODO Make logstash IP and port configurable and add IPv6 support!
+            uvErr = uv_ip4_addr(ip, port, &_dest); // TODO Add IPv6 support!
             if( uvErr == 0 ) {
                 _isInitialized = true;
                 HICAP_LOG_NOTICE("HICAP interface successfully initialized using destination IP '%s' and port %d", ip, port);
