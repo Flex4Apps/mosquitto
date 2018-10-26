@@ -32,63 +32,94 @@
 
 static pthread_mutex_t _hicap_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-//static uv_loop_t            *_uvLoop;
+static char*                _hostStr;
+static char*                _portStr;
+static struct addrinfo      _hints;
+static uv_getaddrinfo_t     _resolver;
 static uv_tcp_t             _uvSock;
 static uv_connect_t         _uvConn;
-static struct sockaddr_in   _dest;
 static bool                 _isInitialized = false;
+static bool                 _isResolveStarted = false;
 static bool                 _isConnected = false;
 
 static void _uv_on_connect_cb( __attribute__((unused)) uv_connect_t *conn, int uvErr ) {
     if( uvErr == 0 ) {
         _isConnected = true;
-        HICAP_LOG_DEBUG("_uv_on_connect() connect successfull");
+        HICAP_LOG_DEBUG("_uv_on_connect_cb() connect successfull");
     } else {
         _isConnected = false;
-        HICAP_LOG_ERR( "_uv_on_connect() connect failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
+        _isResolveStarted = false;
+        HICAP_LOG_ERR( "_uv_on_connect_cb() connect failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
     }
 }
 
-static void _hicap_auto_reconnect_unlocked() {
-    int uvErr;
-    if( _isInitialized ) {
-        if( !_isConnected ) {
-            uvErr = uv_tcp_connect(&_uvConn, &_uvSock, (const struct sockaddr*)&_dest, _uv_on_connect_cb);
-            if( uvErr != 0 ) {
-                HICAP_LOG_ERR( "uv_tcp_connect() failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
-            }
-        }
+static void _uv_on_resolved_cb( __attribute__((unused)) uv_getaddrinfo_t *resolver, int uvErr, struct addrinfo *res ) {
+    if( uvErr < 0 ) {
+        HICAP_LOG_ERR( "_uv_on_resolved_cb() failed for host '%s' port '%s': %s: %s", _hostStr, _portStr, uv_err_name(uvErr), uv_strerror(uvErr) );
+        _isConnected = false;
+        _isResolveStarted = false;
     } else {
-        HICAP_LOG_ERR( "cannot initiate reconnect" );
-    }
-}
-
-static bool _hicap_init_unlocked() {
-    int uvErr;
-    if( _isInitialized == false ) {
+        char addr[17] = {'\0'};
+        uv_ip4_name((struct sockaddr_in*) res->ai_addr, addr, 16);
+        HICAP_LOG_NOTICE( "_uv_on_resolved_cb() resolved IP '%s' for host '%s' port '%s'", addr, _hostStr, _portStr );
+        memset(&_uvConn, 0, sizeof(_uvConn));
         uvErr = uv_tcp_init(uv_default_loop(), &_uvSock);
         if( uvErr == 0 ) {
-            char *ip = getenv("HICAP_IP");
-            if(!ip)
-                ip = "127.0.0.1";
-            char *portStr = getenv("HICAP_PORT");
-            int port = portStr ? atoi(portStr) : 12345;
-            uvErr = uv_ip4_addr(ip, port, &_dest); // TODO Add IPv6 support!
-            if( uvErr == 0 ) {
-                _isInitialized = true;
-                HICAP_LOG_NOTICE("HICAP interface successfully initialized using destination IP '%s' and port %d", ip, port);
-                _hicap_auto_reconnect_unlocked();
-                return true;
-            } else {
-                HICAP_LOG_ERR( "uv_ip4_addr() failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
+            uvErr = uv_tcp_connect(&_uvConn, &_uvSock, (const struct sockaddr*)(res->ai_addr), _uv_on_connect_cb);
+            uv_freeaddrinfo(res);
+            if( uvErr != 0 ) { // }&& uvErr != uv_translate_sys_error(EISCONN) ) {
+                HICAP_LOG_ERR( "uv_tcp_connect() failed for host '%s' port '%s': %s: %s", _hostStr, _portStr, uv_err_name(uvErr), uv_strerror(uvErr) );
+                _isConnected = false;
+                _isResolveStarted = false;
             }
         } else {
             HICAP_LOG_ERR( "uv_tcp_init() failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
+            _isConnected = false;
+            _isResolveStarted = false;
         }
-        return false;
-    } else {
-        return true; // already initialized
     }
+}
+
+/**
+ * Only called, if _isInitialized is already true.
+ */
+static bool _hicap_auto_reconnect_unlocked() {
+    if( _isConnected ) {
+        return true;
+    } else if( _isResolveStarted == false ) {
+        int uvErr;
+        _isResolveStarted = true;
+        HICAP_LOG_NOTICE( "_hicap_auto_reconnect_unlocked() starting hostname resolution for host '%s' port '%s'", _hostStr, _portStr );
+        uvErr = uv_getaddrinfo( uv_default_loop(), &_resolver, _uv_on_resolved_cb, _hostStr, _portStr, &_hints );
+        if( uvErr != 0 ) {
+            HICAP_LOG_ERR( "cannot initiate reconnect: uv_getaddrinfo() failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
+            _isResolveStarted = false;
+        }
+    }
+    return false;
+}
+
+/**
+ * Is only processed once on startup when _isInitialized is still false.
+ */
+static bool _hicap_init_unlocked() {
+    if( _isInitialized == false ) {
+        _isInitialized = true;
+        _hostStr = getenv("HICAP_HOST");
+        if(!_hostStr)
+            _hostStr = "127.0.0.1";
+        _portStr = getenv("HICAP_PORT");
+        if(!_portStr)
+            _portStr = "12345";
+        memset(&_hints, 0, sizeof(_hints));
+        _hints.ai_family = PF_INET;
+        _hints.ai_socktype = SOCK_STREAM;
+        _hints.ai_protocol = IPPROTO_TCP;
+        _hints.ai_flags = 0;
+        HICAP_LOG_NOTICE("HICAP interface successfully initialized using destination host '%s' and port '%s'", _hostStr, _portStr);
+        _hicap_auto_reconnect_unlocked(); // try connect on startup, don't care about the result
+    }
+    return true;
 }
 
 static bool _hicap_init() {
@@ -114,11 +145,14 @@ void hicap_run() {
 static void _uv_on_close_cb( __attribute__((unused)) uv_handle_t* handle ) {
     HICAP_LOG_DEBUG();
     _isConnected = false;
+    _isResolveStarted = false;
 }
 
 static void _hicap_shutdown_unlocked() {
     HICAP_LOG_DEBUG();
-    uv_close( (uv_handle_t*)&_uvSock, _uv_on_close_cb );
+    if( !uv_is_closing((uv_handle_t*)&_uvSock) ) {
+        uv_close( (uv_handle_t*)&_uvSock, _uv_on_close_cb );
+    }
     uv_stop( uv_default_loop() );
     uv_loop_close( uv_default_loop() );
 }
@@ -136,12 +170,17 @@ static void _uv_on_write_cb( uv_write_t *req, int uvErr ) {
     } else {
         HICAP_LOG_ERR( "_uv_on_write() write failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
         _isConnected = false;
-        //uv_close( (uv_handle_t*)&_uvSock, _uv_on_close_cb );
+        _isResolveStarted = false;
+        /*if( !uv_is_closing((uv_handle_t*)&_uvSock) ) {
+            uv_close( (uv_handle_t*)&_uvSock, _uv_on_close_cb );
+        }*/
     }
-    if( req && req->data )
+    if( req && req->data ) {
         free(req->data);
-    if( req )
+    }
+    if( req ) {
         free(req);
+    }
 }
 
 /**
@@ -152,25 +191,26 @@ static bool _hicap_write( void *data, size_t dataLen ) {
     int uvErr;
     pthread_mutex_lock( &_hicap_mutex );
     HICAP_LOG_DEBUG("writing %zd bytes", dataLen);
-    _hicap_auto_reconnect_unlocked();
-    //if( dataLen > PIPE_BUF ) {
-    //    HICAP_LOG_WARN("atomar write of message (len:%zd) not guaranteed (max buf size:%d)", dataLen, PIPE_BUF);
-    //}
-    uv_write_t *req = (uv_write_t*) malloc(sizeof(uv_write_t));
-    uv_buf_t buf = uv_buf_init(data, dataLen);
-    req->data = data; // remember for later free
-    //int isWritable = uv_is_writable( (uv_stream_t*)(&_uvSock) );
-    //HICAP_LOG_DEBUG( "is writable: %s", isWritable?"yes":"no");
-    uvErr = uv_write( req, (uv_stream_t*)(&_uvSock), &buf, 1, _uv_on_write_cb );
-    if( uvErr == 0 ) {
-        HICAP_LOG_DEBUG( "uv_write() success" );
-        //int alive = uv_loop_alive( uv_default_loop() );
-        //HICAP_LOG_DEBUG("loop alive: %s", alive != 0 ? "yes" : "stopped");
-        retval = true;
-    } else {
-        HICAP_LOG_ERR( "uv_write() failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
-        free(req);
-        free(data);
+    if( _hicap_auto_reconnect_unlocked() == true ) { // otherwise we are still trying to resolve destination host
+        //if( dataLen > PIPE_BUF ) {
+        //    HICAP_LOG_WARN("atomar write of message (len:%zd) not guaranteed (max buf size:%d)", dataLen, PIPE_BUF);
+        //}
+        uv_write_t *req = (uv_write_t*) malloc(sizeof(uv_write_t));
+        uv_buf_t buf = uv_buf_init(data, dataLen);
+        req->data = data; // remember for later free
+        //int isWritable = uv_is_writable( (uv_stream_t*)(&_uvSock) );
+        //HICAP_LOG_DEBUG( "is writable: %s", isWritable?"yes":"no");
+        uvErr = uv_write( req, (uv_stream_t*)(&_uvSock), &buf, 1, _uv_on_write_cb );
+        if( uvErr == 0 ) {
+            HICAP_LOG_DEBUG( "uv_write() success" );
+            //int alive = uv_loop_alive( uv_default_loop() );
+            //HICAP_LOG_DEBUG("loop alive: %s", alive != 0 ? "yes" : "stopped");
+            retval = true;
+        } else {
+            HICAP_LOG_ERR( "uv_write() failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
+            free(req);
+            free(data);
+        }
     }
     pthread_mutex_unlock( &_hicap_mutex );
     return retval;
@@ -393,11 +433,6 @@ void hicap_capture(struct mosquitto *context, char *topic, void *payload, uint32
         }
     }
 
-//cleanup:
-    //if( line != NULL) {
-    //    free(line);
-    //    line = NULL;
-    //}
     if( jsonObj != NULL ) {
         json_decref(jsonObj);
         jsonObj = NULL;
