@@ -349,9 +349,9 @@ static int _hicap_add_ssl_cn(json_t *jsonObj, X509 *client_cert) {
 /**
  * $ openssl x509 -noout -in client.crt -text
  */
-static int _hicap_add_ssl(json_t *jsonObj, SSL *ssl) {
-    int retval = 1;
+static void _hicap_add_ssl(json_t *jsonObj, SSL *ssl) {
     if(ssl != NULL) {
+        // collect SSL connection information in case of client certificate authentication is used
         X509 *client_cert;
         if( (client_cert = SSL_get_peer_certificate(ssl)) ) {
             // use debug dump from openssl to dump all info available
@@ -362,19 +362,19 @@ static int _hicap_add_ssl(json_t *jsonObj, SSL *ssl) {
             }
             // see also: openssl/crypto/asn1/t_x509.c:X509_print_ex()
             if( _hicap_add_ssl_sn(jsonObj, client_cert) == 0 ) {
-                if( _hicap_add_ssl_cn(jsonObj, client_cert) == 0 ) {
-                    retval = 0;
-                }
+                _hicap_add_ssl_cn(jsonObj, client_cert);
             }
             X509_free(client_cert);
-        } else {
-            HICAP_LOG_ERR("cannot obtain peer certificate");
         }
+        else {
+            HICAP_LOG_DEBUG("SSL is used without client certificate authentication");
+        }
+
+        //! \todo TODO collect SSL connection information in case of client certificate authentication is NOT used
+        
     } else {
-        HICAP_LOG_INFO("missing ssl");
-        retval = 0;
+        HICAP_LOG_INFO("SSL is not used");
     }
-    return retval;
 }
 
 static int _hicap_add_ts(json_t *jsonObj) {
@@ -398,9 +398,6 @@ static int _hicap_add_ts(json_t *jsonObj) {
     return retval;
 }
 
-/**
- * \todo TODO maybe as thread
- */
 void hicap_capture(struct mosquitto *context, char *topic, void *payload, uint32_t payloadLen) {
     json_t *jsonObj = NULL, *jsonRoot = NULL;
     char *line = NULL;
@@ -410,7 +407,7 @@ void hicap_capture(struct mosquitto *context, char *topic, void *payload, uint32
         jsonObj = json_object();
         if( jsonRoot!= NULL && jsonObj != NULL ) {
             int res = 0;
-            res |= _hicap_add_ssl(jsonObj, context->ssl);                       // serial number (SN) and common name (CN) of client certificate
+            _hicap_add_ssl(jsonObj, context->ssl);                              // serial number (SN) and common name (CN) of client certificate
             res |= _hicap_add_str(jsonObj, "topic", topic);
             res |= _hicap_add_str(jsonObj, "clientIP", context->address);       // IP of client, maybe NATed
             res |= _hicap_add_int(jsonObj, "port", context->listener->port);    // incoming port (listen port of broker)
