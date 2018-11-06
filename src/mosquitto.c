@@ -417,6 +417,10 @@ int main(int argc, char *argv[])
 #endif
 	context__free_disused(&int_db);
 
+#ifdef WITH_HICAP
+	hicap_shutdown();
+#endif // WITH_HICAP
+
 	db__close(&int_db);
 
 	if(listensock){
@@ -440,10 +444,6 @@ int main(int argc, char *argv[])
 
 	config__cleanup(int_db.config);
 	net__cleanup();
-
-#ifdef WITH_HICAP
-	hicap_shutdown();
-#endif // WITH_HICAP
 
 	return rc;
 }

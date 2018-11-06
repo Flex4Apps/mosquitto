@@ -588,6 +588,11 @@ void do_disconnect(struct mosquitto_db *db, struct mosquitto *context)
 	if(context->state == mosq_cs_disconnected){
 		return;
 	}
+
+#ifdef WITH_HICAP
+	hicap_capture_disconnect( context );
+#endif // WITH_HICAP
+
 #ifdef WITH_WEBSOCKETS
 	if(context->wsi){
 		if(context->state != mosq_cs_disconnecting){

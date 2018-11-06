@@ -13,7 +13,10 @@
     #define HICAP_LOG_WARN(  fmt, args...) _HICAP_LOG(MOSQ_LOG_WARNING, fmt , ##args)
     #define HICAP_LOG_ERR(   fmt, args...) _HICAP_LOG(MOSQ_LOG_ERR,     fmt , ##args)
 
-    extern void hicap_capture(struct mosquitto *context, char *topic, void *payload, uint32_t payloadlen);
+    extern void hicap_capture_publish(struct mosquitto *context, char *topic, void *payload, uint32_t payloadlen);
+    extern void hicap_capture_subscribe(struct mosquitto *context, char *topic);
+    extern void hicap_capture_connect(struct mosquitto *context, int result);
+    extern void hicap_capture_disconnect(struct mosquitto *context);
 
     extern void hicap_startup();
     extern void hicap_run();

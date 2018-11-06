@@ -22,6 +22,10 @@ Contributors:
 #include "packet_mosq.h"
 #include "util_mosq.h"
 
+#ifdef WITH_HICAP
+#include <hicap.h>
+#endif // WITH_HICAP
+
 int send__connack(struct mosquitto *context, int ack, int result)
 {
 	struct mosquitto__packet *packet = NULL;
@@ -34,6 +38,10 @@ int send__connack(struct mosquitto *context, int ack, int result)
 			log__printf(NULL, MOSQ_LOG_DEBUG, "Sending CONNACK to %s (%d, %d)", context->address, ack, result);
 		}
 	}
+
+#ifdef WITH_HICAP
+	hicap_capture_connect( context, result );
+#endif // WITH_HICAP
 
 	packet = mosquitto__calloc(1, sizeof(struct mosquitto__packet));
 	if(!packet) return MOSQ_ERR_NOMEM;

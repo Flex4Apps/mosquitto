@@ -23,6 +23,9 @@ Contributors:
 #include "memory_mosq.h"
 #include "packet_mosq.h"
 
+#ifdef WITH_HICAP
+#include <hicap.h>
+#endif // WITH_HICAP
 
 
 int handle__subscribe(struct mosquitto_db *db, struct mosquitto *context)
@@ -109,6 +112,9 @@ int handle__subscribe(struct mosquitto_db *db, struct mosquitto *context)
 				sub = sub_mount;
 
 			}
+#ifdef WITH_HICAP
+			hicap_capture_subscribe( context, sub );
+#endif // WITH_HICAP
 			log__printf(NULL, MOSQ_LOG_DEBUG, "\t%s (QoS %d)", sub, qos);
 
 			if(context->protocol == mosq_p_mqtt311){
