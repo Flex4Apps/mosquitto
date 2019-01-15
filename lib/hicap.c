@@ -108,24 +108,32 @@ static bool _hicap_auto_reconnect_unlocked() {
     return false;
 }
 
+#define ENV_HOST    "HICAP_HOST"    //!< environment variable name to override logstash/netcat destination host name or IP address
+#define ENV_PORT    "HICAP_PORT"    //!< environment variable name to override logstash/netcat destination port number or name
+#define HOST_DEF    "127.0.0.1"     //!< default logstash/netcat destination host name or IP address
+#define PORT_DEF    "12345"         //!< default logstash/netcat destination port number or name
+
 /**
  * Is only processed once on startup when _isInitialized is still false.
  */
 static bool _hicap_init_unlocked() {
     if( _isInitialized == false ) {
         _isInitialized = true;
-        _hostStr = getenv("HICAP_HOST");
+        _hostStr = getenv(ENV_HOST);
         if(!_hostStr)
-            _hostStr = "127.0.0.1";
-        _portStr = getenv("HICAP_PORT");
+            _hostStr = HOST_DEF;
+        _portStr = getenv(ENV_PORT);
         if(!_portStr)
-            _portStr = "12345";
+            _portStr = PORT_DEF;
         memset(&_hints, 0, sizeof(_hints));
         _hints.ai_family = PF_INET;
         _hints.ai_socktype = SOCK_STREAM;
         _hints.ai_protocol = IPPROTO_TCP;
         _hints.ai_flags = 0;
         HICAP_LOG_NOTICE("HICAP interface successfully initialized using destination host '%s' and port '%s'", _hostStr, _portStr);
+        HICAP_LOG_NOTICE("To override capture destination host name or IP address (default=" HOST_DEF ") use environment variable " ENV_HOST "!");
+        HICAP_LOG_NOTICE("To override capture destination host port number or name (default=" PORT_DEF ") use environment variable " ENV_PORT "!");
+        HICAP_LOG_NOTICE("For capturing use logstash or a quick <$ netcat -l -p %s> on %s", _portStr, _hostStr);
         _hicap_auto_reconnect_unlocked(); // try connect on startup, don't care about the result
     }
     return true;
@@ -198,7 +206,7 @@ static void _uv_on_write_cb( uv_write_t *req, int uvErr ) {
 /**
  * NOTE: The caller must NOT free data in any case.
  */
-static bool _hicap_write( void *data, size_t dataLen ) {
+static bool _hicap_write_raw( void *data, size_t dataLen ) {
     bool retval = false;
     int uvErr;
     pthread_mutex_lock( &_hicap_mutex );
@@ -218,14 +226,37 @@ static bool _hicap_write( void *data, size_t dataLen ) {
             //int alive = uv_loop_alive( uv_default_loop() );
             //HICAP_LOG_DEBUG("loop alive: %s", alive != 0 ? "yes" : "stopped");
             retval = true;
+            data = NULL;
         } else {
             HICAP_LOG_ERR( "uv_write() failed: %s: %s", uv_err_name(uvErr), uv_strerror(uvErr) );
             free(req);
             free(data);
+            data = NULL;
         }
+    } else {
+        free( data );
     }
     pthread_mutex_unlock( &_hicap_mutex );
     return retval;
+}
+
+static bool _hicap_write( json_t *jsonRoot ) {
+    bool res = false;
+    if( jsonRoot != NULL ) {
+        char *line = json_dumps(jsonRoot, 0);
+        if( line != NULL ) {
+            HICAP_LOG_DEBUG("line: '%s'\n", line!=NULL?line:"<NULL>");
+            size_t len = strlen(line);
+            line[len] = '\n';
+            res = _hicap_write_raw( line, len+1 ); // the function cares about freeing line in any case
+            //line[len] = '\0';
+        } else {
+            HICAP_LOG_ERR("cannot convert JSON root object into plain text format");
+        }
+    } else {
+        HICAP_LOG_WARN("empty JSON root object given");
+    }
+    return res;
 }
 
 static int _hicap_add_kvp(json_t *jsonObj, char *keyName, json_t *jsonVal) {
@@ -252,6 +283,8 @@ static int _hicap_add_kvp(json_t *jsonObj, char *keyName, json_t *jsonVal) {
     }
     return -1;
 }
+
+#define _hicap_add_null(jsonObj, keyName) _hicap_add_kvp(jsonObj, keyName, NULL)
 
 static int _hicap_add_str_len(json_t *jsonObj, char *keyName, char *value, size_t len) {
     json_t *jsonVal = NULL;
@@ -300,24 +333,19 @@ static int _hicap_add_bool(json_t *jsonObj, char *keyName, bool value) {
 static int _hicap_add_b64(json_t *jsonObj, char *keyName, void *data, uint32_t dataLen) {
     int retVal = -1;
     char *b64 = NULL;
-    HICAP_LOG_DEBUG("jsonObj:%s data:%s dataLen:%u", jsonObj!=NULL?"OK":"NULL", data!=NULL?"OK":"NULL", dataLen);
-    if( jsonObj != NULL ) {
-        size_t b64sz = 0;
-        if( data != NULL && dataLen > 0 ) {
-            nsuerror nsuErr = nsu_base64_encode_alloc(data, dataLen, (uint8_t**)(&b64), &b64sz); // not null terminated
-            HICAP_LOG_DEBUG("b64:%s b64sz:%zu err:%d", b64!=NULL?"OK":"NULL", b64sz, nsuErr);
-            if( nsuErr != NSUERROR_OK ) {
-                HICAP_LOG_ERR("base64 encode failed: err=%d", nsuErr);
-                goto cleanup;
-            }
+    size_t b64sz = 0;
+    if( data != NULL && dataLen > 0 ) {
+        nsuerror nsuErr = nsu_base64_encode_alloc(data, dataLen, (uint8_t**)(&b64), &b64sz); // not null terminated
+        HICAP_LOG_DEBUG("b64:%s b64sz:%zu err:%d", b64!=NULL?"OK":"NULL", b64sz, nsuErr);
+        if( nsuErr == NSUERROR_OK ) {
+            retVal = _hicap_add_str_len(jsonObj, keyName, b64, b64sz);
+        } else {
+            HICAP_LOG_ERR("base64 encode failed: err=%d", nsuErr);
+            if(b64 != NULL)
+                free(b64);
         }
-        retVal = _hicap_add_str_len(jsonObj, keyName, b64, b64sz);
     } else {
-        HICAP_LOG_ERR("missing json obj");
-    }
-cleanup:
-    if(b64 != NULL) {
-        free(b64);
+        retVal = _hicap_add_null(jsonObj, keyName);
     }
     return retVal;
 }
@@ -426,7 +454,7 @@ static int _hicap_add_listeners(json_t *jsonObj) {
     if( db != NULL ) {
         for( int i=0; i<db->config->listener_count; i++) {
             struct mosquitto__listener *listener = &db->config->listeners[i];
-            if( listener->protocol == mp_mqtt ) {
+            if( (listener != NULL) && (listener->protocol == mp_mqtt) ) {
                 json_t *jsonArrObj = json_object();
                 _hicap_add_str(jsonArrObj, "bind", listener->host != NULL ? listener->host : "");
                 _hicap_add_int(jsonArrObj, "port", listener->port);
@@ -440,29 +468,26 @@ static int _hicap_add_listeners(json_t *jsonObj) {
 
 void hicap_capture_publish(struct mosquitto *context, char *topic, void *payload, uint32_t payloadLen) {
     json_t *jsonObj = NULL, *jsonRoot = NULL;
-    char *line = NULL;
     HICAP_LOG_DEBUG();
     if( _hicap_init() == true ) {
         jsonRoot = json_object();
         jsonObj = json_object();
-        if( jsonRoot!= NULL && jsonObj != NULL ) {
+        if( (jsonRoot!= NULL) && (jsonObj != NULL) ) {
             int res = 0;
             res |= _hicap_add_str(jsonObj, "action", "PUBLISH");
-            _hicap_add_ssl(jsonObj, context->ssl);                              // serial number (SN) and common name (CN) of client certificate
+            _hicap_add_ssl(jsonObj, context ? context->ssl : NULL);                     // serial number (SN) and common name (CN) of client certificate
             res |= _hicap_add_str(jsonObj, "topic", topic);
-            res |= _hicap_add_str(jsonObj, "clientIP", context->address);       // IP of client, maybe NATed
-            res |= _hicap_add_int(jsonObj, "port", context->listener->port);    // incoming port (listen port of broker)
-            res |= _hicap_add_str(jsonObj, "clientID", context->id);            // sent by client or generated by broker
+            res |= _hicap_add_str(jsonObj, "clientIP", context ? context->address : NULL);  // IP of client, maybe NATed
+            if( context && context->listener )
+                res |= _hicap_add_int(jsonObj, "port", context->listener->port);        // incoming port (listen port of broker)
+            else
+                res |= _hicap_add_null(jsonObj, "port");
+            res |= _hicap_add_str(jsonObj, "clientID", context ? context->id : NULL);   // sent by client or generated by broker
             res |= _hicap_add_ts(jsonObj);
             res |= _hicap_add_b64(jsonObj, "payload", payload, payloadLen);
             res |= _hicap_add_kvp(jsonRoot, "mqtt", jsonObj);
             if( res == 0 ) {
-                line = json_dumps(jsonRoot, 0);
-                HICAP_LOG_DEBUG("line:%s\n", line!=NULL?line:"<NULL>");
-                size_t len = strlen(line);
-                line[len] = '\n';
-                _hicap_write( line, len+1 ); // the function cares about freeing line in any case
-                line[len] = '\0';
+                _hicap_write( jsonRoot );
             } else {
                 HICAP_LOG_ERR("cannot assemble json obj");
             }
@@ -470,20 +495,12 @@ void hicap_capture_publish(struct mosquitto *context, char *topic, void *payload
             HICAP_LOG_ERR("cannot create new json obj");
         }
     }
-
-    if( jsonObj != NULL ) {
-        json_decref(jsonObj);
-        jsonObj = NULL;
-    }
-    if( jsonRoot != NULL ) {
-        json_decref(jsonRoot);
-        jsonRoot = NULL;
-    }
+    json_decrefp(&jsonObj);
+    json_decrefp(&jsonRoot);
 }
 
 void hicap_capture_subscribe(struct mosquitto *context, char *topic) {
     json_t *jsonObj = NULL, *jsonRoot = NULL;
-    char *line = NULL;
     HICAP_LOG_DEBUG();
     if( _hicap_init() == true ) {
         jsonRoot = json_object();
@@ -491,20 +508,18 @@ void hicap_capture_subscribe(struct mosquitto *context, char *topic) {
         if( jsonRoot!= NULL && jsonObj != NULL ) {
             int res = 0;
             res |= _hicap_add_str(jsonObj, "action", "SUBSCRIBE");
-            _hicap_add_ssl(jsonObj, context->ssl);                              // serial number (SN) and common name (CN) of client certificate
+            _hicap_add_ssl(jsonObj, context ? context->ssl : NULL);                 // serial number (SN) and common name (CN) of client certificate
             res |= _hicap_add_str(jsonObj, "topic", topic);
-            res |= _hicap_add_str(jsonObj, "clientIP", context->address);       // IP of client, maybe NATed
-            res |= _hicap_add_int(jsonObj, "port", context->listener->port);    // incoming port (listen port of broker)
-            res |= _hicap_add_str(jsonObj, "clientID", context->id);            // sent by client or generated by broker
+            res |= _hicap_add_str(jsonObj, "clientIP", context ? context->address : NULL);  // IP of client, maybe NATed
+            if( context && context->listener )
+                res |= _hicap_add_int(jsonObj, "port", context->listener->port);    // incoming port (listen port of broker)
+            else
+                res |= _hicap_add_null(jsonObj, "port");
+            res |= _hicap_add_str(jsonObj, "clientID", context->id);                // sent by client or generated by broker
             res |= _hicap_add_ts(jsonObj);
             res |= _hicap_add_kvp(jsonRoot, "mqtt", jsonObj);
             if( res == 0 ) {
-                line = json_dumps(jsonRoot, 0);
-                HICAP_LOG_DEBUG("line:%s\n", line!=NULL?line:"<NULL>");
-                size_t len = strlen(line);
-                line[len] = '\n';
-                _hicap_write( line, len+1 ); // the function cares about freeing line in any case
-                line[len] = '\0';
+                _hicap_write( jsonRoot );
             } else {
                 HICAP_LOG_ERR("cannot assemble json obj");
             }
@@ -512,15 +527,8 @@ void hicap_capture_subscribe(struct mosquitto *context, char *topic) {
             HICAP_LOG_ERR("cannot create new json obj");
         }
     }
-
-    if( jsonObj != NULL ) {
-        json_decref(jsonObj);
-        jsonObj = NULL;
-    }
-    if( jsonRoot != NULL ) {
-        json_decref(jsonRoot);
-        jsonRoot = NULL;
-    }
+    json_decrefp(&jsonObj);
+    json_decrefp(&jsonRoot);
 }
 
 /**
@@ -528,21 +536,23 @@ void hicap_capture_subscribe(struct mosquitto *context, char *topic) {
  */
 void hicap_capture_connect(struct mosquitto *context, int result) {
     json_t *jsonObj = NULL, *jsonRoot = NULL;
-    char *line = NULL;
     HICAP_LOG_DEBUG();
     if( _hicap_init() == true ) {
         jsonRoot = json_object();
         jsonObj = json_object();
-        if( jsonRoot!= NULL && jsonObj != NULL ) {
+        if( (jsonRoot!= NULL) && (jsonObj != NULL) ) {
             int res = 0;
             res |= _hicap_add_str(jsonObj, "action", "CONNECT");
-            res |= _hicap_add_str(jsonObj, "clientIP", context->address);       // IP of client, maybe NATed
-            res |= _hicap_add_int(jsonObj, "port", context->listener->port);    // incoming port (listen port of broker)
-            res |= _hicap_add_str(jsonObj, "clientID", context->id);            // sent by client or generated by broker
+            res |= _hicap_add_str(jsonObj, "clientIP", context ? context->address : NULL);  // IP of client, maybe NATed
+            if( context && context->listener )
+                res |= _hicap_add_int(jsonObj, "port", context->listener->port);    // incoming port (listen port of broker)
+            else
+                res |= _hicap_add_null(jsonObj, "port");
+            res |= _hicap_add_str(jsonObj, "clientID", context ? context->id : NULL);   // sent by client or generated by broker
             res |= _hicap_add_ts(jsonObj);
             res |= _hicap_add_bool(jsonObj, "success", result == CONNACK_ACCEPTED ? true : false);
             res |= _hicap_add_str(jsonObj, "state", result == CONNACK_ACCEPTED ? "ACCEPTED" : "REFUSED");
-            if(result != CONNACK_ACCEPTED) {
+            if( result != CONNACK_ACCEPTED ) {
                 res |= _hicap_add_int(jsonObj, "errCode", result);
                 switch(result) { // see CONNACK_ in mqtt3_protocol.h
                     case CONNACK_REFUSED_PROTOCOL_VERSION: res |= _hicap_add_str(jsonObj, "reason", "CONNACK_REFUSED_PROTOCOL_VERSION"); break;
@@ -555,12 +565,7 @@ void hicap_capture_connect(struct mosquitto *context, int result) {
             }
             res |= _hicap_add_kvp(jsonRoot, "mqtt", jsonObj);
             if( res == 0 ) {
-                line = json_dumps(jsonRoot, 0);
-                HICAP_LOG_DEBUG("line:%s\n", line!=NULL?line:"<NULL>");
-                size_t len = strlen(line);
-                line[len] = '\n';
-                _hicap_write( line, len+1 ); // the function cares about freeing line in any case
-                line[len] = '\0';
+                _hicap_write( jsonRoot );
             } else {
                 HICAP_LOG_ERR("cannot assemble json obj");
             }
@@ -568,20 +573,12 @@ void hicap_capture_connect(struct mosquitto *context, int result) {
             HICAP_LOG_ERR("cannot create new json obj");
         }
     }
-
-    if( jsonObj != NULL ) {
-        json_decref(jsonObj);
-        jsonObj = NULL;
-    }
-    if( jsonRoot != NULL ) {
-        json_decref(jsonRoot);
-        jsonRoot = NULL;
-    }
+    json_decrefp(&jsonObj);
+    json_decrefp(&jsonRoot);
 }
 
 void hicap_capture_disconnect(struct mosquitto *context) {
     json_t *jsonObj = NULL, *jsonRoot = NULL;
-    char *line = NULL;
     HICAP_LOG_DEBUG();
     if( _hicap_init() == true ) {
         jsonRoot = json_object();
@@ -589,18 +586,16 @@ void hicap_capture_disconnect(struct mosquitto *context) {
         if( jsonRoot!= NULL && jsonObj != NULL ) {
             int res = 0;
             res |= _hicap_add_str(jsonObj, "action", "DISCONNECT");
-            res |= _hicap_add_str(jsonObj, "clientIP", context->address);       // IP of client, maybe NATed
-            res |= _hicap_add_int(jsonObj, "port", context->listener->port);    // incoming port (listen port of broker)
-            res |= _hicap_add_str(jsonObj, "clientID", context->id);            // sent by client or generated by broker
+            res |= _hicap_add_str(jsonObj, "clientIP", context ? context->address : NULL);  // IP of client, maybe NATed
+            if( context && context->listener )
+                res |= _hicap_add_int(jsonObj, "port", context->listener->port);            // incoming port (listen port of broker)
+            else
+                res |= _hicap_add_null(jsonObj, "port");
+            res |= _hicap_add_str(jsonObj, "clientID", context ? context->id : NULL);       // sent by client or generated by broker
             res |= _hicap_add_ts(jsonObj);
             res |= _hicap_add_kvp(jsonRoot, "mqtt", jsonObj);
             if( res == 0 ) {
-                line = json_dumps(jsonRoot, 0);
-                HICAP_LOG_DEBUG("line:%s\n", line!=NULL?line:"<NULL>");
-                size_t len = strlen(line);
-                line[len] = '\n';
-                _hicap_write( line, len+1 ); // the function cares about freeing line in any case
-                line[len] = '\0';
+                _hicap_write( jsonRoot );
             } else {
                 HICAP_LOG_ERR("cannot assemble json obj");
             }
@@ -608,20 +603,12 @@ void hicap_capture_disconnect(struct mosquitto *context) {
             HICAP_LOG_ERR("cannot create new json obj");
         }
     }
-
-    if( jsonObj != NULL ) {
-        json_decref(jsonObj);
-        jsonObj = NULL;
-    }
-    if( jsonRoot != NULL ) {
-        json_decref(jsonRoot);
-        jsonRoot = NULL;
-    }
+    json_decrefp(&jsonObj);
+    json_decrefp(&jsonRoot);
 }
 
 static void _hicap_capture_startup() {
     json_t *jsonObj = NULL, *jsonRoot = NULL;
-    char *line = NULL;
     HICAP_LOG_DEBUG();
     if( _hicap_init() == true ) {
         jsonRoot = json_object();
@@ -632,12 +619,7 @@ static void _hicap_capture_startup() {
             res |= _hicap_add_listeners(jsonObj);
             res |= _hicap_add_kvp(jsonRoot, "mqtt", jsonObj);
             if( res == 0 ) {
-                line = json_dumps(jsonRoot, 0);
-                HICAP_LOG_DEBUG("line:%s\n", line!=NULL?line:"<NULL>");
-                size_t len = strlen(line);
-                line[len] = '\n';
-                _hicap_write( line, len+1 ); // the function cares about freeing line in any case
-                line[len] = '\0';
+                _hicap_write( jsonRoot );
             } else {
                 HICAP_LOG_ERR("cannot assemble json obj");
             }
@@ -645,20 +627,12 @@ static void _hicap_capture_startup() {
             HICAP_LOG_ERR("cannot create new json obj");
         }
     }
-
-    if( jsonObj != NULL ) {
-        json_decref(jsonObj);
-        jsonObj = NULL;
-    }
-    if( jsonRoot != NULL ) {
-        json_decref(jsonRoot);
-        jsonRoot = NULL;
-    }
+    json_decrefp(&jsonObj);
+    json_decrefp(&jsonRoot);
 }
 
 static void _hicap_capture_shutdown() {
     json_t *jsonObj = NULL, *jsonRoot = NULL;
-    char *line = NULL;
     HICAP_LOG_DEBUG();
     if( _hicap_init() == true ) {
         jsonRoot = json_object();
@@ -669,12 +643,7 @@ static void _hicap_capture_shutdown() {
             res |= _hicap_add_listeners(jsonObj);
             res |= _hicap_add_kvp(jsonRoot, "mqtt", jsonObj);
             if( res == 0 ) {
-                line = json_dumps(jsonRoot, 0);
-                HICAP_LOG_DEBUG("line:%s\n", line!=NULL?line:"<NULL>");
-                size_t len = strlen(line);
-                line[len] = '\n';
-                _hicap_write( line, len+1 ); // the function cares about freeing line in any case
-                line[len] = '\0';
+                _hicap_write( jsonRoot );
             } else {
                 HICAP_LOG_ERR("cannot assemble json obj");
             }
@@ -682,13 +651,6 @@ static void _hicap_capture_shutdown() {
             HICAP_LOG_ERR("cannot create new json obj");
         }
     }
-
-    if( jsonObj != NULL ) {
-        json_decref(jsonObj);
-        jsonObj = NULL;
-    }
-    if( jsonRoot != NULL ) {
-        json_decref(jsonRoot);
-        jsonRoot = NULL;
-    }
+    json_decrefp(&jsonObj);
+    json_decrefp(&jsonRoot);
 }
