@@ -6,6 +6,8 @@ It allows to capture all incoming publish messages and their connection metadata
 
 The collected information is sent over TCP/IP JSON to a remote logstash service.
 
+See also https://github.com/Flex4Apps/mosquitto/wiki.
+
 ## General Usage
 
 The destination host/IP and port of the listening logstash service or netcat can be given to the mosquitto commandline:
